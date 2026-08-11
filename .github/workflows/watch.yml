@@ -1,0 +1,49 @@
+name: ballet-watcher
+
+on:
+  schedule:
+    # Every 10 minutes. GitHub may delay scheduled runs under load; that's fine.
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}   # lets you run it manually from the Actions tab
+
+# Avoid overlapping runs.
+concurrency:
+  group: ballet-watcher
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      # Restore the last-seen availability state so we only alert on NEW openings.
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: ballet-state-${{ github.run_id }}
+          restore-keys: ballet-state-
+
+      - name: Run watcher
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python watch.py
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: ballet-state-${{ github.run_id }}
