@@ -54,6 +54,11 @@ TARGETS = [
     },
 ]
 
+# The studio's public adult-program page. We watch it for schedule changes:
+# new class sign-up links appearing or the posted schedule PDF changing name
+# usually means a new term / updated schedule was published.
+PROGRAM_URL = "https://www.bellevueclassicalballet.com/adult-program"
+
 STATE_FILE = pathlib.Path(os.environ.get("STATE_FILE", "state.json"))
 EMAIL_USER = os.environ.get("EMAIL_USER", "").strip()          # SMTP username / from address
 EMAIL_PASS = os.environ.get("EMAIL_PASS", "").strip()          # SMTP password (Gmail app password)
@@ -177,6 +182,37 @@ def scrape(target):
     return parse_page_text(page_text)
 
 
+def scrape_program():
+    """Signature (sorted list) of the adult-program page's booking links and
+    schedule PDFs. A change means the studio published a new schedule/term.
+    Returns None on failure (so we don't false-alarm on a transient hiccup)."""
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(PROGRAM_URL, wait_until="networkidle", timeout=60_000)
+            page.wait_for_timeout(1500)
+            hrefs = page.eval_on_selector_all(
+                "a[href]", "els => els.map(e => e.getAttribute('href'))"
+            )
+            browser.close()
+    except Exception as e:  # noqa: BLE001
+        log(f"[warn] program page scrape failed: {e}")
+        return None
+    sig = set()
+    for h in hrefs or []:
+        if not h:
+            continue
+        h = h.strip()
+        low = h.lower()
+        if "as.me" in low or "acuityscheduling.com" in low or low.endswith(".pdf"):
+            sig.add(h)
+    if not sig:
+        log("[warn] program page: no booking links found (page structure changed?)")
+        return None
+    return sorted(sig)
+
+
 # --------------------------------------------------------------------------
 # State (so we don't re-alert every run while a slot stays open)
 # --------------------------------------------------------------------------
@@ -195,36 +231,89 @@ def save_state(state):
 
 # --------------------------------------------------------------------------
 def main():
-    state = load_state()
-    new_state = {}
-    alerts = []
+    raw = load_state()
+    # Migrate old flat {slot-key: bool} format to the structured one.
+    if raw and not any(k in raw for k in ("slots", "patterns", "program")):
+        raw = {"slots": raw}
+    slot_state = raw.get("slots", {})
+    pattern_state = raw.get("patterns", {})
+    program_state = raw.get("program")
+
+    new_slots = {}
+    new_patterns = {}
+    open_alerts = []      # a wanted class opened up
+    change_alerts = []    # the schedule itself changed
 
     for target in TARGETS:
         slots = scrape(target)
         log(f"[{target['name']}] {len(slots)} class time(s) on page")
+
+        # (1) Spot opened up in a wanted slot.
         for slot in slots:
             if not wanted(slot, target):
                 continue
             key = f"{target['name']}|{slot['start'].isoformat()}"
             open_now = slot["seats"] > 0
-            new_state[key] = open_now
-            was_open = state.get(key, False)
+            new_slots[key] = open_now
+            was_open = slot_state.get(key, False)
             log(f"  wanted: {slot['start']:%a %b %d %I:%M %p} -> {slot['seats']} spot(s)")
             if open_now and not was_open:
-                alerts.append(
+                open_alerts.append(
                     f"{target['name']} has {slot['seats']} spot(s): "
                     f"{slot['start']:%A %b %-d, %-I:%M %p}\n{target['url']}"
                 )
 
-    # Keep state for slots we still care about but didn't see this run.
-    for k, v in state.items():
-        new_state.setdefault(k, v)
-    save_state(new_state)
+        # (2) Recurring class times added/removed (schedule change).
+        if slots:
+            patterns = sorted({f"{s['start']:%a %-I:%M %p}" for s in slots})
+            new_patterns[target["name"]] = patterns
+            prev = pattern_state.get(target["name"])
+            if prev is not None and set(patterns) != set(prev):
+                added = [p for p in patterns if p not in prev]
+                removed = [p for p in prev if p not in patterns]
+                parts = []
+                if added:
+                    parts.append("New times: " + ", ".join(added))
+                if removed:
+                    parts.append("No longer listed: " + ", ".join(removed))
+                change_alerts.append(
+                    f"{target['name']} class times changed.\n"
+                    + "\n".join(parts) + f"\n{target['url']}"
+                )
+        else:
+            # Empty (transient failure or nothing offered) -> keep old patterns.
+            new_patterns[target["name"]] = pattern_state.get(target["name"], [])
 
-    if alerts:
-        send_email("🩰 Ballet class opening!", "\n\n".join(alerts))
+    # (3) Program page links / schedule PDF changed (new term published).
+    prog_sig = scrape_program()
+    if prog_sig is None:
+        new_program = program_state
     else:
-        log("[done] no newly-open wanted slots")
+        new_program = prog_sig
+        if program_state is not None and set(prog_sig) != set(program_state):
+            added = [x for x in prog_sig if x not in program_state]
+            removed = [x for x in program_state if x not in prog_sig]
+            parts = []
+            if added:
+                parts.append("New / changed links:\n  " + "\n  ".join(added))
+            if removed:
+                parts.append("Gone:\n  " + "\n  ".join(removed))
+            change_alerts.append(
+                "Adult-program page changed (possible new schedule / term):\n"
+                + "\n".join(parts) + f"\n{PROGRAM_URL}"
+            )
+
+    # Keep state for wanted slots we still track but didn't see this run.
+    for k, v in slot_state.items():
+        new_slots.setdefault(k, v)
+    save_state({"slots": new_slots, "patterns": new_patterns, "program": new_program})
+
+    if open_alerts:
+        send_email("🩰 Ballet class opening!", "\n\n".join(open_alerts))
+    if change_alerts:
+        send_email("🗓️ Ballet schedule updated", "\n\n".join(change_alerts))
+    if not open_alerts and not change_alerts:
+        log("[done] no newly-open slots and no schedule changes")
 
 
 if __name__ == "__main__":
