@@ -30,7 +30,7 @@ import ssl
 import sys
 from email.message import EmailMessage
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # --------------------------------------------------------------------------
 # Config: which classes to watch.
@@ -47,7 +47,7 @@ from playwright.sync_api import sync_playwright
 TARGETS = [
     {
         "name": "Beginner 1",
-        "url": "https://bellevueclassicalballet.as.me/beginner1summer",
+        "url": "https://bellevueclassicalballet.as.me/beginner1",
         "weekdays": {0, 1, 2, 3, 4},   # Mon-Fri
         "min_hour": 17,                # 5pm or later
         "max_hour": 24,
@@ -160,24 +160,48 @@ def wanted(slot, target):
 # --------------------------------------------------------------------------
 # Browser
 # --------------------------------------------------------------------------
+# JS predicate: the schedule has actually rendered once the page shows either
+# availability text or Acuity's "not currently available" notice.
+_READY_JS = r"""() => {
+  const t = document.body ? document.body.innerText : '';
+  return /spots?\s+left/i.test(t) || /no\s+times/i.test(t)
+      || /not currently available/i.test(t)
+      || /couldn't be found/i.test(t);
+}"""
+
+
 def scrape(target):
+    page_text = ""
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        log(f"[nav] {target['name']}: {target['url']}")
-        page.goto(target["url"], wait_until="networkidle", timeout=60_000)
-        page.wait_for_timeout(3000)  # let lazy class list settle
-        page_text = page.inner_text("body")
-        browser.close()
+        try:
+            page = browser.new_page()
+            log(f"[nav] {target['name']}: {target['url']}")
+            # networkidle never settles on Acuity (background analytics polling),
+            # so wait for the DOM then for the class list to actually render.
+            page.goto(target["url"], wait_until="domcontentloaded", timeout=60_000)
+            try:
+                page.wait_for_function(_READY_JS, timeout=30_000)
+            except PlaywrightTimeoutError:
+                log(f"[warn] {target['name']}: schedule text didn't appear in 30s; "
+                    f"parsing whatever rendered")
+            page.wait_for_timeout(1500)
+            page_text = page.inner_text("body")
+        except PlaywrightTimeoutError as e:
+            log(f"[warn] {target['name']}: navigation failed, skipping this run: {e}")
+        finally:
+            browser.close()
 
     if DEBUG:
         dbg = pathlib.Path(f"debug-{re.sub(r'[^a-z0-9]+', '-', target['name'].lower())}.txt")
         dbg.write_text(page_text)
         log(f"[debug] wrote rendered page to {dbg}")
 
-    if "not currently available" in page_text.lower():
-        log(f"[warn] {target['name']}: Acuity reports scheduling not currently "
-            f"available for this URL (term may have changed / slug outdated).")
+    low = page_text.lower()
+    if "couldn't be found" in low or "not currently available" in low:
+        log(f"[warn] {target['name']}: booking URL looks dead/empty "
+            f"(term changed / slug outdated?). Update TARGETS url in watch.py: "
+            f"{target['url']}")
 
     return parse_page_text(page_text)
 
@@ -189,13 +213,19 @@ def scrape_program():
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(PROGRAM_URL, wait_until="networkidle", timeout=60_000)
-            page.wait_for_timeout(1500)
-            hrefs = page.eval_on_selector_all(
-                "a[href]", "els => els.map(e => e.getAttribute('href'))"
-            )
-            browser.close()
+            try:
+                page = browser.new_page()
+                page.goto(PROGRAM_URL, wait_until="domcontentloaded", timeout=60_000)
+                try:
+                    page.wait_for_selector('a[href*="as.me"], a[href$=".pdf"]', timeout=20_000)
+                except PlaywrightTimeoutError:
+                    log("[warn] program page: booking links didn't appear in 20s")
+                page.wait_for_timeout(1000)
+                hrefs = page.eval_on_selector_all(
+                    "a[href]", "els => els.map(e => e.getAttribute('href'))"
+                )
+            finally:
+                browser.close()
     except Exception as e:  # noqa: BLE001
         log(f"[warn] program page scrape failed: {e}")
         return None
