@@ -51,6 +51,9 @@ TARGETS = [
         "weekdays": {0, 1, 2, 3, 4},   # Mon-Fri
         "min_hour": 17,                # 5pm or later
         "max_hour": 24,
+        # Pin to specific calendar date(s) (YYYY-MM-DD). Leave empty/omit to
+        # watch every day matching weekdays+hours. Currently sniping Sep 10.
+        "only_dates": {"2026-09-10"},
     },
 ]
 
@@ -151,6 +154,9 @@ def parse_page_text(text):
 
 def wanted(slot, target):
     start = slot["start"]
+    only = target.get("only_dates")
+    if only and start.strftime("%Y-%m-%d") not in only:
+        return False
     return (
         start.weekday() in target["weekdays"]
         and target["min_hour"] <= start.hour < target["max_hour"]
