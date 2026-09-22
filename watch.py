@@ -46,15 +46,22 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 # --------------------------------------------------------------------------
 TARGETS = [
     {
-        "name": "Beginner 1",
-        "url": "https://bellevueclassicalballet.as.me/beginner1",
+        "name": "Beginner 2 (Sat)",
+        "url": "https://bellevueclassicalballet.as.me/beginner2",
         "weekdays": {5},               # Saturday
         "min_hour": 0,                 # any time
         "max_hour": 24,
-        # Pin to specific calendar date(s) (YYYY-MM-DD); omit to watch all.
+        "only_dates": None,            # specific YYYY-MM-DD dates, or None
+        "before_date": "2026-10-24",   # only classes on or before this date
+    },
+    {
+        "name": "Beginner 1 (Thu eve)",
+        "url": "https://bellevueclassicalballet.as.me/beginner1",
+        "weekdays": {3},               # Thursday
+        "min_hour": 17,                # 5pm or later
+        "max_hour": 24,
         "only_dates": None,
-        # Only classes on or before this date (YYYY-MM-DD).
-        "before_date": "2026-10-24",
+        "before_date": None,
     },
 ]
 
