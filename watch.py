@@ -48,12 +48,13 @@ TARGETS = [
     {
         "name": "Beginner 1",
         "url": "https://bellevueclassicalballet.as.me/beginner1",
-        "weekdays": {0, 1, 2, 3, 4},   # Mon-Fri
-        "min_hour": 17,                # 5pm or later
+        "weekdays": {5},               # Saturday
+        "min_hour": 0,                 # any time
         "max_hour": 24,
-        # Pin to specific calendar date(s) (YYYY-MM-DD). Leave empty/omit to
-        # watch every day matching weekdays+hours. Currently sniping Sep 10.
-        "only_dates": {"2026-09-10"},
+        # Pin to specific calendar date(s) (YYYY-MM-DD); omit to watch all.
+        "only_dates": None,
+        # Only classes on or before this date (YYYY-MM-DD).
+        "before_date": "2026-10-24",
     },
 ]
 
@@ -154,8 +155,12 @@ def parse_page_text(text):
 
 def wanted(slot, target):
     start = slot["start"]
+    day = start.strftime("%Y-%m-%d")
     only = target.get("only_dates")
-    if only and start.strftime("%Y-%m-%d") not in only:
+    if only and day not in only:
+        return False
+    before = target.get("before_date")
+    if before and day > before:
         return False
     return (
         start.weekday() in target["weekdays"]
